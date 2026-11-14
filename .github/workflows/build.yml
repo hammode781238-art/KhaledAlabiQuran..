@@ -1,0 +1,128 @@
+name: Build Offline APK
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1) تنزيل ملفات المستودع
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 2) تثبيت Java
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # 3) تثبيت Gradle
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      # 4) فك ملف ZIP
+      - name: Extract project ZIP
+        shell: bash
+        run: |
+          set -e
+
+          ZIP_FILE=$(find . -maxdepth 1 -type f -iname "*.zip" | head -n 1)
+
+          if [ -z "$ZIP_FILE" ]; then
+            echo "لم يتم العثور على ملف ZIP"
+            exit 1
+          fi
+
+          echo "ZIP found: $ZIP_FILE"
+
+          mkdir extracted
+
+          unzip -q "$ZIP_FILE" -d extracted
+
+          # البحث عن مجلد المشروع
+          PROJECT_DIR=$(find extracted -type f -name "settings.gradle" -o -name "settings.gradle.kts" | head -n 1 | xargs -r dirname)
+
+          if [ -z "$PROJECT_DIR" ]; then
+            echo "لم يتم العثور على مشروع Android داخل ZIP"
+            exit 1
+          fi
+
+          echo "Project directory: $PROJECT_DIR"
+
+          cp -a "$PROJECT_DIR"/. .
+
+      # 5) تثبيت ffmpeg و yt-dlp
+      - name: Install audio tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg unzip
+          python3 -m pip install --upgrade yt-dlp
+
+      # 6) تنزيل الصوتيات من links.txt
+      - name: Download audio files
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p app/src/main/assets/audio
+
+          rm -f app/src/main/assets/audio/*.mp3
+
+          if [ ! -f links.txt ]; then
+            echo "ملف links.txt غير موجود"
+            exit 1
+          fi
+
+          NUMBER=1
+
+          while IFS= read -r URL || [ -n "$URL" ]; do
+
+            URL="$(echo "$URL" | xargs)"
+
+            # تجاهل الأسطر الفارغة
+            if [ -z "$URL" ]; then
+              continue
+            fi
+
+            echo "======================================"
+            echo "Downloading audio #$NUMBER"
+            echo "$URL"
+            echo "======================================"
+
+            yt-dlp \
+              --no-playlist \
+              --extract-audio \
+              --audio-format mp3 \
+              --audio-quality 128K \
+              --output "app/src/main/assets/audio/${NUMBER}.%(ext)s" \
+              "$URL"
+
+            NUMBER=$((NUMBER + 1))
+
+          done < links.txt
+
+      # 7) عرض الملفات التي تم تنزيلها
+      - name: Show downloaded files
+        run: |
+          echo "Downloaded audio files:"
+          ls -lh app/src/main/assets/audio/
+
+      # 8) بناء APK
+      - name: Build APK
+        run: |
+          gradle :app:assembleDebug --no-daemon
+
+      # 9) رفع APK الناتج
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: offline-audio-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
